@@ -1,0 +1,11 @@
+# Python
+*.pyc
+
+# Virtualenv
+.venv/*
+
+# VScode
+.vscode/*
+
+# Requirements
+vendor/needletail
