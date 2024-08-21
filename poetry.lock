@@ -26,6 +26,20 @@ files = [
 ]
 
 [[package]]
+name = "needletail"
+version = "0.5.1"
+description = "FASTX parsing and k-mer methods"
+optional = false
+python-versions = "*"
+files = [
+    {file = "needletail-0.5.1-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:3e60bb855ce9334c7f0d9b5eb4c306870f66443a52e11e4a85680cc8363486b0"},
+]
+
+[package.source]
+type = "file"
+url = "vendor/needletail-0.5.1-cp312-cp312-manylinux_2_28_x86_64.whl"
+
+[[package]]
 name = "numpy"
 version = "2.0.1"
 description = "Fundamental package for array computing in Python"
@@ -120,4 +134,4 @@ telegram = ["requests"]
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.9"
-content-hash = "10b14cc5963ba42d32aeaef420c0bb6b864c4ab4bcdb65604f440d8f6f132b0f"
+content-hash = "df3049af1031c99f6002682f9cb559d72cc54093675e4530286905ee17fa8123"

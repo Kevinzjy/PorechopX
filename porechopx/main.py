@@ -1,10 +1,9 @@
 import os
 import sys
 import click
-from time import time
 import importlib.metadata
-from datetime import timedelta
-from porechopx.parser import FastqReader
+from datetime import datetime
+from porechopx.parser import FastqChoper, FastqReader
 from porechopx.logger import get_logger
 __version__ = importlib.metadata.version('porechopx')
 
@@ -74,7 +73,7 @@ __version__ = importlib.metadata.version('porechopx')
 @click.option('--adapter_threshold', type=float, default=90.0,
               help='An adapter set has to have at least this percent identity to be labelled as '
                    'present and trimmed off (0 to 100)')
-@click.option('--check_reads', type=int, default=10000,
+@click.option('--check_reads', 'check_read_count', type=int, default=10000,
               help='This many reads will be aligned to all possible adapters to determine which '
                    'adapter sets are present')
 @click.option('--scoring_scheme', type=str, default='3,-6,-5,-2',
@@ -117,46 +116,50 @@ def main(input, output, barcode_stats_csv, format, verbosity, threads,
          barcode_dir, barcode_labels, extended_labels,
          native_barcodes, pcr_barcodes, rapid_barcodes, limit_barcodes_to, custom_barcodes,
          barcode_threshold, barcode_diff, require_two_barcodes, untrimmed, discard_unassigned,
-         adapter_threshold, check_reads, scoring_scheme,
+         adapter_threshold, check_read_count, scoring_scheme,
          end_size, min_trim_size, extra_end_trim, end_threshold, no_split,
          discard_middle, middle_threshold, extra_middle_trim_good_side, extra_middle_trim_bad_side,
          min_split_read_size):
 
-    # Checking arguments
-    try:
-        scoring_scheme_vals = [int(x) for x in scoring_scheme.split(',')]
-    except ValueError:
-        sys.exit('Error: incorrectly formatted scoring scheme')
-    if len(scoring_scheme_vals) != 4:
-        sys.exit('Error: incorrectly formatted scoring scheme')
+     # Checking arguments
+     try:
+          scoring_scheme_vals = [int(x) for x in scoring_scheme.split(',')]
+     except ValueError:
+          sys.exit('Error: incorrectly formatted scoring scheme')
+     if len(scoring_scheme_vals) != 4:
+          sys.exit('Error: incorrectly formatted scoring scheme')
 
-    if barcode_dir and output:
-        sys.exit('Error: only one of the following options may be used: --output, --barcode_dir')
+     if barcode_dir and output:
+          sys.exit('Error: only one of the following options may be used: --output, --barcode_dir')
 
-    if untrimmed and not barcode_dir:
-        sys.exit('Error: --untrimmed can only be used with --barcode_dir')
+     if untrimmed and not barcode_dir:
+          sys.exit('Error: --untrimmed can only be used with --barcode_dir')
 
-    if barcode_dir:
-        discard_middle = True
+     if barcode_dir:
+          discard_middle = True
 
-    print_dest = sys.stderr if output is None and barcode_dir is None else sys.stdout
+     print_dest = sys.stderr if output is None and barcode_dir is None else sys.stdout
 
-    if threads < 1:
-        sys.exit('Error: at least one thread required')
+     if threads < 1:
+          sys.exit('Error: at least one thread required')
 
-    # Program starts
-    logger = get_logger("porechopx", debug=verbosity > 1)
-    logger.info("Start running")
-    st = time()
+     # Program starts
+     logger = get_logger("porechopx", debug=verbosity > 1)
+     start_time = datetime.now()
 
-    # Run codes
-    fq = FastqReader(input, chunk_size=1_000_000)
-    for _ in fq:
-        pass
+     # Step
+     logger.info("Checking adapters")
+     fq = FastqReader(input, check_read_count, False)
+     check_reads = fq.__next__()
+     fq.close()
 
-    # Finish
-    elapsed = time() - st
-    logger.info(f'Finished! Elapsed time: {timedelta(seconds=elapsed)}')
+     logger.info("Trimming adapters")
+     FastqChoper(input, threads)
+
+     # Finish
+     time = datetime.now() - start_time
+     logger.info(f'Time taken:  {time}')
+
 
 if __name__ == '__main__':
     main()
