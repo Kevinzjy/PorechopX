@@ -2,14 +2,18 @@ import os
 import sys
 import gzip
 import logging
+import shutil
+import subprocess
+import multiprocessing
 import numpy as np
 from tqdm import tqdm
-import multiprocessing
+from pathlib import Path
 from itertools import cycle
 from typing import NamedTuple
 from traceback import format_exc
+from collections import defaultdict
 from porechopx.porechop import NanoporeRead
-from porechopx.misc import int_to_str
+from porechopx.misc import int_to_str, print_table
 logger = logging.getLogger("porechopx")
 
 # Nanopore read data class
@@ -26,18 +30,18 @@ class FastqReaderPy(object):
         """
         Initialize the FastqReader with the path to the FASTQ file.
         """
-        self.filepath = filepath
+        self.input = filepath
         self.chunk_size = chunk_size
 
         # Open handles
-        self.file = open(self.filepath, 'rb')
+        self.file = open(self.input, 'rb')
         self.fh = gzip.open(self.file, 'rt')
 
         # Progress bar
         self.cursor = 0
         if verbose:
             self.pbar = tqdm(
-                total=os.path.getsize(self.filepath),
+                total=os.path.getsize(self.input),
                 ncols=75, unit='b', unit_scale=True, unit_divisor=1024
             )
         else:
@@ -107,14 +111,14 @@ class FastqReaderRS(object):
         Initialize the FastqReaderX with the path to the FASTQ file.
         """
         from needletail import parse_fastx_file
-        self.filepath = filepath
+        self.input = filepath
         self.chunk_size = chunk_size
         self.file = parse_fastx_file(filepath)
 
         # Progressbar
         if verbose:
             self.pbar = tqdm(
-                total=os.path.getsize(self.filepath),
+                total=os.path.getsize(self.input),
                 ncols=75, unit='b', unit_scale=True, unit_divisor=1024
             )
         else:
@@ -187,6 +191,9 @@ class FastqChoper(object):
                  require_two_barcodes, forward_or_reverse_barcodes,
                  middle_threshold, extra_middle_trim_good_side, extra_middle_trim_bad_side,
                  discard_middle, discard_unassigned, no_split,
+                 out_format, output, barcode_stats_csv,
+                 min_split_read_size,
+                 barcode_dir, barcode_labels, extended_labels, untrimmed,
                  chunk_size=100_000, cache_size=10) -> None:
 
         # Global parameters
@@ -215,7 +222,35 @@ class FastqChoper(object):
         self.discard_unassigned = discard_unassigned
         self.no_split = no_split
 
+        # Parameters for output
+        self.out_format = out_format
+        self.output = Path(output) if output is not None else None
+        self.barcode_stats_csv = barcode_stats_csv
+        self.min_split_size = min_split_read_size
+        self.barcode_dir = Path(barcode_dir) if barcode_dir is not None else None
+        self.barcode_labels = barcode_labels
+        self.extended_labels = extended_labels
+        self.untrimmed = untrimmed
+
         self.chunk_size = chunk_size
+
+        # Saving output files
+        trimmed_or_untrimmed = 'untrimmed' if self.untrimmed else 'trimmed'
+        if self.barcode_dir is not None:
+            verb = 'Saving'
+            destination = 'barcode-specific files'
+        elif self.output is None:
+            verb = 'Outputting'
+            destination = 'stdout'
+        else:
+            verb = 'Saving'
+            destination = 'file'
+        logger.info(f'{verb} {trimmed_or_untrimmed} reads to {destination}')
+
+        if shutil.which('pigz'):
+            logger.info('pigz found - using it to compress instead of gzip')
+        else:
+            logger.info('pigz not found - using gzip to compress')
 
         # Init multiprocessing
         manager = multiprocessing.Manager()
@@ -249,6 +284,7 @@ class FastqChoper(object):
         """
         try:
             # Iterator
+            # TODO: infer data format
             fq = FastqReader(self.input, self.chunk_size)
 
             # Pass data into queues
@@ -313,7 +349,7 @@ class FastqChoper(object):
 
                     if self.check_barcodes:
                         read.determine_barcode(
-                            barcode_threshold, barcode_diff, require_two_barcodes)
+                            self.barcode_threshold, self.barcode_diff, self.require_two_barcodes)
 
                     # elif verbosity == 2:
                     #     sys.stderr.write(read.formatted_start_and_end_seq(end_size, extra_trim_size, check_barcodes),
@@ -354,6 +390,58 @@ class FastqChoper(object):
 
     def writer(self):
         try:
+            # Barcode summary
+            if self.barcode_stats_csv is not None:
+                custom_output = open(self.barcode_stats_csv, "w")
+                custom_output.write("name,start_time,barcode_call,start_name,start_id,end_name,end_id,middle_name,middle_id\n")
+
+            # TODO: auto set output format
+            self.out_format = 'fastq.gz'
+            # if out_format == 'auto':
+            #     if output is None:
+            #         out_format = read_type.lower()
+            #         if barcode_dir is not None and input_filename.lower().endswith('.gz'):
+            #             out_format += '.gz'
+            #     elif '.fasta.gz' in output.lower():
+            #         out_format = 'fasta.gz'
+            #     elif '.fastq.gz' in output.lower():
+            #         out_format = 'fastq.gz'
+            #     elif '.fasta' in output.lower():
+            #         out_format = 'fasta'
+            #     elif '.fastq' in output.lower():
+            #         out_format = 'fastq'
+            #     else:
+            #         out_format = read_type.lower()
+
+            gzipped_out = False
+            gzip_command = 'gzip'
+            if self.out_format.endswith('.gz') and \
+                (self.barcode_dir is not None or self.output is not None):
+                gzipped_out = True
+                self.out_format = self.out_format[:-3]
+                if shutil.which('pigz'):
+                    gzip_command = f'pigz -p {self.threads}'
+
+            # Output reads to barcode bins
+            if self.barcode_dir is not None:
+                if not self.barcode_dir.is_dir():
+                    self.barcode_dir.mkdir(parents=True, exist_ok=True)
+                barcode_files = {}
+                barcode_read_counts, barcode_base_counts = defaultdict(int), defaultdict(int)
+
+            # Output all reads to stdout
+            elif self.output is None:
+                pass
+
+            # Output all reads to file
+            else:
+                if gzipped_out:
+                    out_filename = self.output.with_name(f'TEMP_{os.getpid()}.fastq')
+                else:
+                    out_filename = self.output
+                out_file = open(out_filename, 'wt')
+
+            # Iter through results
             total_reads = 0
             start_trim_total, start_trim_count = 0, 0
             end_trim_total, end_trim_count = 0, 0
@@ -390,11 +478,101 @@ class FastqChoper(object):
                     end_trim_count += (end_trim_amount > 0).sum()
 
                     middle_trim_count += sum([1 if read.middle_adapter_positions else 0 for read in chunk])
+
+                    # Save to files
                     for read in chunk:
-                        pass
+                        # Barcode information
+                        if self.barcode_stats_csv is not None:
+                            read.write_to_stats_csv(custom_output)
+
+                        # Drop unassigned reads if specified
+                        if self.discard_unassigned and read.barcode_call == 'none':
+                            continue
+
+                        # Prepare output fasta/fastq str
+                        if self.out_format == 'fasta':
+                            read_str = read.get_fasta(
+                                self.min_split_size, self.discard_middle, self.untrimmed,
+                                self.barcode_labels, self.extended_labels)
+                        else:
+                            read_str = read.get_fastq(
+                                self.min_split_size, self.discard_middle, self.untrimmed,
+                                self.barcode_labels, self.extended_labels)
+                        if not read_str:
+                            continue
+
+                        # Output reads to barcode bin
+                        if self.barcode_dir is not None:
+                            barcode_name = read.barcode_call
+                            if barcode_name not in barcode_files:
+                                barcode_files[barcode_name] = open(
+                                    self.barcode_dir / f'{barcode_name}.{self.out_format}', 'wt'
+                                )
+                            barcode_files[barcode_name].write(read_str)
+                            barcode_read_counts[barcode_name] += 1
+                            if self.untrimmed:
+                                seq_length = len(read.seq)
+                            else:
+                                seq_length = read.seq_length_with_start_end_adapters_trimmed()
+                            barcode_base_counts[barcode_name] += seq_length
+
+                        # Output all reads to stdin.
+                        elif self.output is None:
+                            print(read_str, end='')
+
+                        # Output all reads to file.
+                        else:
+                            out_file.write(read_str)
+
+            # Barcoding summary
+            if self.barcode_stats_csv is not None:
+                custom_output.close()
+            if self.barcode_dir is not None:
+                if gzipped_out:
+                    logger.info("Compressing output")
+
+                table = [['Barcode', 'Reads', 'Bases', 'File']]
+                for barcode_name in sorted(barcode_files.keys()):
+                    barcode_files[barcode_name].close()
+                    bin_filename = self.barcode_dir / f'{barcode_name}.{self.out_format}'
+
+                    if gzipped_out:
+                        if not bin_filename.is_file():
+                            continue
+                        bin_filename_gz = bin_filename.with_name(bin_filename.name + ".gz")
+                        if bin_filename_gz.is_file():
+                            bin_filename_gz.unlink()
+
+                        try:
+                            subprocess.check_output(f'{gzip_command} {bin_filename}',
+                                                    stderr=subprocess.STDOUT, shell=True)
+                        except subprocess.CalledProcessError:
+                            pass
+                        bin_filename = bin_filename_gz
+
+                    table_row = [barcode_name, int_to_str(barcode_read_counts[barcode_name]),
+                                int_to_str(barcode_base_counts[barcode_name]), str(bin_filename)]
+                    table.append(table_row)
+
+                sys.stderr.write('\n')
+                print_table(table, sys.stderr, alignments='LRRL', max_col_width=60, col_separation=2)
+                sys.stderr.write('\n')
+
+            elif self.output is None:
+                pass
+
+            else:
+                out_file.close()
+                if gzipped_out:
+                    logger.info("Compressing output")
+                    subprocess.check_output(f'{gzip_command} -c {out_filename} > {self.output}',
+                                            stderr=subprocess.STDOUT, shell=True)
+                    out_filename.unlink()
+                logger.info(f'Saved result to {self.output}')
 
             logger.info("Finished trimming")
 
+            # Trimming and splitting summary
             sys.stderr.write('\n' + int_to_str(start_trim_count).rjust(len(int_to_str(total_reads))) +
                 ' / ' + int_to_str(total_reads) + ' reads had adapters trimmed from their start (' +
                 int_to_str(start_trim_total) + ' bp removed)\n')
@@ -405,150 +583,6 @@ class FastqChoper(object):
             sys.stderr.write(int_to_str(middle_trim_count).rjust(len(int_to_str(total_reads))) +
                              ' / ' + int_to_str(total_reads) + ' reads were ' +
                              verb + ' based on middle adapters\n\n')
-
-
-
-            # trimmed_or_untrimmed = 'untrimmed' if untrimmed else 'trimmed'
-            # if barcode_dir is not None:
-            #     verb = 'Saving'
-            #     destination = 'barcode-specific files'
-            # elif output is None:
-            #     verb = 'Outputting'
-            #     destination = 'stdout'
-            # else:
-            #     verb = 'Saving'
-            #     destination = 'file'
-            # logger.info(f'{verb} {trimmed_or_untrimmed} reads to {destination}')
-
-            # if out_format == 'auto':
-            #     if output is None:
-            #         out_format = read_type.lower()
-            #         if barcode_dir is not None and input_filename.lower().endswith('.gz'):
-            #             out_format += '.gz'
-            #     elif '.fasta.gz' in output.lower():
-            #         out_format = 'fasta.gz'
-            #     elif '.fastq.gz' in output.lower():
-            #         out_format = 'fastq.gz'
-            #     elif '.fasta' in output.lower():
-            #         out_format = 'fasta'
-            #     elif '.fastq' in output.lower():
-            #         out_format = 'fastq'
-            #     else:
-            #         out_format = read_type.lower()
-
-            # gzipped_out = False
-            # gzip_command = 'gzip'
-            # if out_format.endswith('.gz') and (barcode_dir is not None or output is not None):
-            #     gzipped_out = True
-            #     out_format = out_format[:-3]
-            #     if shutil.which('pigz'):
-            #         if verbosity > 0:
-            #             print('pigz found - using it to compress instead of gzip')
-            #         gzip_command = 'pigz -p ' + str(threads)
-            #     else:
-            #         if verbosity > 0:
-            #             print('pigz not found - using gzip to compress')
-
-            # # Output reads to barcode bins.
-            # if barcode_dir is not None:
-            #     if not os.path.isdir(barcode_dir):
-            #         os.makedirs(barcode_dir)
-            #     barcode_files = {}
-            #     barcode_read_counts, barcode_base_counts = defaultdict(
-            #         int), defaultdict(int)
-
-            #     for read in reads:
-            #         barcode_name = read.barcode_call
-            #         if discard_unassigned and barcode_name == 'none':
-            #             continue
-            #         if out_format == 'fasta':
-            #             read_str = read.get_fasta(
-            #                 min_split_size, discard_middle, untrimmed, barcode_labels, extended_labels)
-            #         else:
-            #             read_str = read.get_fastq(
-            #                 min_split_size, discard_middle, untrimmed, barcode_labels, extended_labels)
-            #         if not read_str:
-            #             continue
-            #         if barcode_name not in barcode_files:
-            #             barcode_files[barcode_name] = \
-            #                 open(os.path.join(barcode_dir,
-            #                                 barcode_name + '.' + out_format), 'wt')
-            #         barcode_files[barcode_name].write(read_str)
-            #         barcode_read_counts[barcode_name] += 1
-            #         if untrimmed:
-            #             seq_length = len(read.seq)
-            #         else:
-            #             seq_length = read.seq_length_with_start_end_adapters_trimmed()
-            #         barcode_base_counts[barcode_name] += seq_length
-            #     table = [['Barcode', 'Reads', 'Bases', 'File']]
-
-            #     for barcode_name in sorted(barcode_files.keys()):
-            #         barcode_files[barcode_name].close()
-            #         bin_filename = os.path.join(
-            #             barcode_dir, barcode_name + '.' + out_format)
-
-            #         if gzipped_out:
-            #             if not os.path.isfile(bin_filename):
-            #                 continue
-            #             bin_filename_gz = bin_filename + '.gz'
-            #             if os.path.isfile(bin_filename_gz):
-            #                 os.remove(bin_filename_gz)
-            #             try:
-            #                 subprocess.check_output(gzip_command + ' ' + bin_filename,
-            #                                         stderr=subprocess.STDOUT, shell=True)
-            #             except subprocess.CalledProcessError:
-            #                 pass
-            #             bin_filename = bin_filename_gz
-
-            #         table_row = [barcode_name, int_to_str(barcode_read_counts[barcode_name]),
-            #                     int_to_str(barcode_base_counts[barcode_name]), bin_filename]
-            #         table.append(table_row)
-
-            #     if verbosity > 0:
-            #         print('')
-            #         print_table(table, print_dest, alignments='LRRL',
-            #                     max_col_width=60, col_separation=2)
-
-            # # Output to all reads to stdout.
-            # elif output is None:
-            #     for read in reads:
-            #         if discard_unassigned and read.barcode_call == 'none':
-            #             continue
-            #         read_str = read.get_fasta(min_split_size, discard_middle, barcode_labels=barcode_labels, extended_labels=extended_labels) if out_format == 'fasta' \
-            #             else read.get_fastq(min_split_size, discard_middle, barcode_labels=barcode_labels, extended_labels=extended_labels)
-            #         print(read_str, end='')
-            #     if verbosity > 0:
-            #         print('Done', flush=True, file=print_dest)
-
-            # # Output to all reads to file.
-            # else:
-            #     if gzipped_out:
-            #         out_filename = 'TEMP_' + str(os.getpid()) + '.fastq'
-            #     else:
-            #         out_filename = output
-            #     with open(out_filename, 'wt') as out:
-            #         for read in reads:
-            #             if discard_unassigned and read.barcode_call == 'none':
-            #                 continue
-            #             read_str = read.get_fasta(min_split_size, discard_middle, barcode_labels=barcode_labels, extended_labels=extended_labels) if out_format == 'fasta' \
-            #                 else read.get_fastq(min_split_size, discard_middle, barcode_labels=barcode_labels, extended_labels=extended_labels)
-            #             out.write(read_str)
-            #     if gzipped_out:
-            #         subprocess.check_output(gzip_command + ' -c ' + out_filename + ' > ' + output,
-            #                                 stderr=subprocess.STDOUT, shell=True)
-            #         os.remove(out_filename)
-            #     if verbosity > 0:
-            #         print('\nSaved result to ' + os.path.abspath(output), file=print_dest)
-
-            # if verbosity > 0:
-            #     print('', flush=True, file=print_dest)
-
-
-            # if barcode_stats_csv:
-            #     with open("./barcode_stats.csv","w") as custom_output:
-            #         custom_output.write("name,start_time,barcode_call,start_name,start_id,end_name,end_id,middle_name,middle_id\n")
-            #         for read in reads:
-            #             read.write_to_stats_csv(custom_output,barcode_stats_csv)
 
         except Exception as e:
             # Exit process if exception is caught

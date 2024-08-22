@@ -13,16 +13,17 @@ __version__ = importlib.metadata.version('porechopx')
                     'them from the ends and splitting reads with internal adapters')
 @click.version_option(__version__)
 # Main options
-@click.option('-i', '--input', required=True,
+@click.option('-i', '--input', 'input_filepath', required=True,
               help='FASTA/FASTQ of input reads or a directory which will be '
                    'recursively searched for FASTQ files')
-@click.option('-o', '--output',
+@click.option('-o', '--output', 'output_filepath',
               help='Filename for FASTA or FASTQ of trimmed reads (if not set, '
                    'trimmed reads will be printed to stdout)')
-@click.option('--barcode_stats_csv', is_flag=True,
-              help='Option to output a csv file with start/ end/ middle barcode names '
-                   'and percentage identities for each given read')
-@click.option('--format', type=click.Choice(['auto', 'fasta', 'fastq', 'fasta.gz', 'fastq.gz']),
+@click.option('--barcode_stats_csv', default=None,
+              help='Path to a csv file with start/ end/ middle barcode names '
+                   'and percentage identities for each given read ( if not set, '
+                   'no information will be printed)')
+@click.option('--format', 'out_format', type=click.Choice(['auto', 'fasta', 'fastq', 'fasta.gz', 'fastq.gz']),
               default='auto',
               help='Output format for the reads - if auto, the '
                    'format will be chosen based on the output filename or the input '
@@ -113,7 +114,7 @@ __version__ = importlib.metadata.version('porechopx')
 @click.option('--min_split_read_size', type=int, default=1000,
               help='Post-split read pieces smaller than this many base pairs '
                    'will not be outputted')
-def main(input, output, barcode_stats_csv, format, verbosity, threads,
+def main(input_filepath, output_filepath, barcode_stats_csv, out_format, verbosity, threads,
          barcode_dir, barcode_labels, extended_labels,
          native_barcodes, pcr_barcodes, rapid_barcodes, limit_barcodes_to, custom_barcodes,
          barcode_threshold, barcode_diff, require_two_barcodes, untrimmed, discard_unassigned,
@@ -130,7 +131,7 @@ def main(input, output, barcode_stats_csv, format, verbosity, threads,
      if len(scoring_scheme_vals) != 4:
           sys.exit('Error: incorrectly formatted scoring scheme')
 
-     if barcode_dir and output:
+     if barcode_dir and output_filepath:
           sys.exit('Error: only one of the following options may be used: --output, --barcode_dir')
 
      if untrimmed and not barcode_dir:
@@ -151,7 +152,7 @@ def main(input, output, barcode_stats_csv, format, verbosity, threads,
      matching_sets = None
      forward_or_reverse_barcodes = None
 
-     fq = FastqReader(input, check_read_count, False)
+     fq = FastqReader(input_filepath, check_read_count, False)
      check_reads = fq.__next__()
      fq.close()
 
@@ -221,18 +222,15 @@ def main(input, output, barcode_stats_csv, format, verbosity, threads,
                matching_sets = porechop.exclude_end_adapters_for_rapid(matching_sets)
                matching_sets = porechop.fix_up_1d2_sets(matching_sets)
                matching_sets = porechop.add_full_barcode_adapter_sets(matching_sets)
-               if verbosity > 0:
-                    porechop.display_adapter_set_results(search_adapters, matching_sets)
+               porechop.display_adapter_set_results(search_adapters, matching_sets)
 
                if barcode_dir or barcode_labels:
-                    forward_or_reverse_barcodes = choose_barcoding_kit(matching_sets)
+                    forward_or_reverse_barcodes = porechop.choose_barcoding_kit(matching_sets)
 
           if matching_sets:
                check_barcodes = (barcode_dir is not None or barcode_labels is not False)
 
      # Perform adapter & barcode trimming
-     sys.stderr.write('\n')
-
      if matching_sets:
           if no_split:
                logger.info('Trimming adapters from read ends\n')
@@ -252,7 +250,7 @@ def main(input, output, barcode_stats_csv, format, verbosity, threads,
 
           # Multiprocess trimming
           FastqChoper(
-               input, matching_sets, verbosity, end_size,
+               input_filepath, matching_sets, verbosity, end_size,
                extra_end_trim, end_threshold,
                scoring_scheme_vals, min_trim_size,
                threads, check_barcodes, barcode_threshold,
@@ -260,6 +258,8 @@ def main(input, output, barcode_stats_csv, format, verbosity, threads,
                forward_or_reverse_barcodes, middle_threshold,
                extra_middle_trim_good_side, extra_middle_trim_bad_side,
                discard_middle, discard_unassigned, no_split,
+               out_format, output_filepath, barcode_stats_csv, min_split_read_size,
+               barcode_dir, barcode_labels, extended_labels, untrimmed,
                4_000, 10,
           )
 

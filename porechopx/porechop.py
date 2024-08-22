@@ -78,16 +78,18 @@ class NanoporeRead(object):
 
         return start_name, start_id, end_name, end_id, None, None
 
-    def write_to_stats_csv(self, custom_output,barcode_stats_csv=False):
-        if barcode_stats_csv:
-            name_tokens = (self.name).split(' ')
-            name = name_tokens[0]
-            start_time = name_tokens[5].lstrip("start_time=")
-            start_name, start_id, end_name, end_id, middle_name, middle_id = self.get_barcode_hits()
+    def write_to_stats_csv(self, custom_output):
+        """
+        Write barcoding status into csv:
+            start_time has been removed to support both dorado and guppy fastq
+        """
+        # TODO: unify read information for guppy and dorado basecalled fastq
 
-            if not middle_name:
-                middle_name, middle_id = ("none","none")
-            custom_output.write("{},{},{},{},{},{},{},{},{}\n".format(name, start_time, self.barcode_call, start_name, start_id, end_name, end_id, middle_name, middle_id))
+        name = self.name.split()[0]
+        start_name, start_id, end_name, end_id, middle_name, middle_id = self.get_barcode_hits()
+        if not middle_name:
+            middle_name, middle_id = ("none","none")
+        custom_output.write(f"{name},{self.barcode_call},{start_name},{start_id},{end_name},{end_id},{middle_name},{middle_id}\n")
 
     def get_seq_with_start_end_adapters_trimmed(self):
         if not self.start_trim_amount and not self.end_trim_amount:
@@ -650,6 +652,7 @@ def display_adapter_set_results(search_adapters, matching_sets):
             row_colours[len(table) - 1] = 'green'
     print_table(table, sys.stderr, alignments='LRR', row_colour=row_colours,
                 fixed_col_widths=[35, 8, 8])
+    sys.stderr.write('\n')
 
 
 def choose_barcoding_kit(adapter_sets):
@@ -667,6 +670,7 @@ def choose_barcoding_kit(adapter_sets):
             forward_barcodes += score
         elif 'Barcode' in adapter_set.name and '(reverse)' in adapter_set.name:
             reverse_barcodes += score
+
     if forward_barcodes > reverse_barcodes:
         logger.info('Barcodes determined to be in forward orientation')
         return 'forward'
@@ -675,3 +679,10 @@ def choose_barcoding_kit(adapter_sets):
         return 'reverse'
     else:
         return None
+
+
+def add_number_to_read_name(read_name, number):
+    if ' ' not in read_name:
+        return read_name + '_' + str(number)
+    else:
+        return read_name.replace(' ', '_' + str(number) + ' ', 1)
