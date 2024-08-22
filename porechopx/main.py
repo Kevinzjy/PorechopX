@@ -3,6 +3,7 @@ import sys
 import click
 import importlib.metadata
 from datetime import datetime
+from porechopx import porechop, adapters, misc
 from porechopx.parser import FastqChoper, FastqReader
 from porechopx.logger import get_logger
 __version__ = importlib.metadata.version('porechopx')
@@ -76,7 +77,7 @@ __version__ = importlib.metadata.version('porechopx')
 @click.option('--check_reads', 'check_read_count', type=int, default=10000,
               help='This many reads will be aligned to all possible adapters to determine which '
                    'adapter sets are present')
-@click.option('--scoring_scheme', type=str, default='3,-6,-5,-2',
+@click.option('--scoring_scheme', type=str, default='3,-6,5,2',
               help='Comma-delimited string of alignment scores: '
                    'match, mismatch, gap open, gap extend')
 # End adapter settings:
@@ -138,23 +139,132 @@ def main(input, output, barcode_stats_csv, format, verbosity, threads,
      if barcode_dir:
           discard_middle = True
 
-     print_dest = sys.stderr if output is None and barcode_dir is None else sys.stdout
-
      if threads < 1:
           sys.exit('Error: at least one thread required')
 
      # Program starts
      logger = get_logger("porechopx", debug=verbosity > 1)
+
      start_time = datetime.now()
 
-     # Step
-     logger.info("Checking adapters")
+     search_adapters = None
+     matching_sets = None
+     forward_or_reverse_barcodes = None
+
      fq = FastqReader(input, check_read_count, False)
      check_reads = fq.__next__()
      fq.close()
 
-     logger.info("Trimming adapters")
-     FastqChoper(input, threads)
+     # Check adapters
+     if native_barcodes or pcr_barcodes or rapid_barcodes:
+          if native_barcodes:
+               logger.info('Using native barcodes')
+               # construct a smaller set of search adapters with only the 24 barcodes to speed up
+               # the initial step
+               barcodes_set = adapters.NATIVE_BARCODES
+               forward_or_reverse_barcodes = 'reverse'
+               # barcode_adapters = []
+               # for i in range(1, 25):
+               #     barcode_adapters.append(make_full_native_barcode_adapter(i))
+          elif pcr_barcodes:
+               logger.info('Using PCR barcodes')
+               barcodes_set = adapters.PCR_BARCODES
+               forward_or_reverse_barcodes = 'forward'
+          else:
+               logger.info('Using rapid barcodes')
+               barcodes_set = adapters.RAPID_BARCODES
+               forward_or_reverse_barcodes = 'forward'
+
+          if limit_barcodes_to:
+               logger.info(f'Limiting barcodes to : {limit_barcodes_to}')
+
+          logger.info(f'{len(barcodes_set)} barcodes in search set')
+
+          matching_sets = []
+          if limit_barcodes_to:
+               for barcode_number in limit_barcodes_to:
+                    if barcode_number < 1 or barcode_number > len(barcodes_set):
+                         logger.error('Barcode number out of range of chosen set (1-24 for native, '
+                                      '1-12 for rapid, 1-96 for PCR)')
+                         sys.exit(1)
+                    matching_sets.append(barcodes_set[barcode_number - 1])
+          else:
+               matching_sets.extend(barcodes_set)
+
+          check_barcodes = True
+
+     else:
+          if limit_barcodes_to:
+               logger.error('To limit search to specific barcodes, specify whether using native, '
+                            'PCR, or rapid barcodes')
+               sys.exit(1)
+
+          if custom_barcodes:
+               matching_sets = adapters.load_custom_barcodes(custom_barcodes)
+               if args.verbosity > 0:
+                    logger.info('Using custom barcodes')
+                    logger.info(f'{len(matching_sets)} barcodes in search set')
+
+          if not matching_sets:
+               if not search_adapters:
+                    # just add all of the adapters
+                    search_adapters = adapters.NATIVE_BARCODES
+                    search_adapters.extend(adapters.PCR_BARCODES)
+                    search_adapters.extend(adapters.RAPID_BARCODES)
+                    search_adapters.extend(adapters.OTHER_ADAPTERS)
+
+               matching_sets = porechop.find_matching_adapter_sets(
+                    check_reads, verbosity, end_size,
+                    scoring_scheme_vals, adapter_threshold,
+                    threads, search_adapters
+               )
+               matching_sets = porechop.exclude_end_adapters_for_rapid(matching_sets)
+               matching_sets = porechop.fix_up_1d2_sets(matching_sets)
+               matching_sets = porechop.add_full_barcode_adapter_sets(matching_sets)
+               if verbosity > 0:
+                    porechop.display_adapter_set_results(search_adapters, matching_sets)
+
+               if barcode_dir or barcode_labels:
+                    forward_or_reverse_barcodes = choose_barcoding_kit(matching_sets)
+
+          if matching_sets:
+               check_barcodes = (barcode_dir is not None or barcode_labels is not False)
+
+     # Perform adapter & barcode trimming
+     sys.stderr.write('\n')
+
+     if matching_sets:
+          if no_split:
+               logger.info('Trimming adapters from read ends\n')
+          else:
+               verb = 'discarding' if discard_middle else 'splitting'
+               logger.info(f'Trimming adapters from read ends, and {verb} reads containing middle adapters\n')
+
+          name_len = max(max(len(x.start_sequence[0]) for x in matching_sets),
+                         max(len(x.end_sequence[0]) if x.end_sequence else 0 for x in matching_sets))
+          for matching_set in matching_sets:
+               sys.stderr.write('  ' + matching_set.start_sequence[0].rjust(name_len) + ': ' +
+                    misc.red(matching_set.start_sequence[1]) + '\n')
+               if matching_set.end_sequence:
+                    sys.stderr.write('  ' + matching_set.end_sequence[0].rjust(name_len) + ': ' +
+                         misc.red(matching_set.end_sequence[1]) + '\n')
+          sys.stderr.write('\nthreads: ' + str(threads) + '\n\n')
+
+          # Multiprocess trimming
+          FastqChoper(
+               input, matching_sets, verbosity, end_size,
+               extra_end_trim, end_threshold,
+               scoring_scheme_vals, min_trim_size,
+               threads, check_barcodes, barcode_threshold,
+               barcode_diff, require_two_barcodes,
+               forward_or_reverse_barcodes, middle_threshold,
+               extra_middle_trim_good_side, extra_middle_trim_bad_side,
+               discard_middle, discard_unassigned, no_split,
+               4_000, 10,
+          )
+
+     else:
+          logger.info('No adapters found - output reads are unchanged from input reads\n')
 
      # Finish
      time = datetime.now() - start_time

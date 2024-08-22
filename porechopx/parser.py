@@ -2,11 +2,14 @@ import os
 import sys
 import gzip
 import logging
+import numpy as np
 from tqdm import tqdm
 import multiprocessing
 from itertools import cycle
 from typing import NamedTuple
 from traceback import format_exc
+from porechopx.porechop import NanoporeRead
+from porechopx.misc import int_to_str
 logger = logging.getLogger("porechopx")
 
 # Nanopore read data class
@@ -178,10 +181,40 @@ class FastqChoper(object):
     """
     Class for trmming nanopore reads
     """
-    def __init__(self, filepath, threads, chunk_size=100_000, cache_size=10) -> None:
+    def __init__(self, filepath, matching_sets, verbosity, end_size, extra_trim_size,
+                 end_threshold, scoring_scheme_vals, min_trim_size,
+                 threads, check_barcodes, barcode_threshold, barcode_diff,
+                 require_two_barcodes, forward_or_reverse_barcodes,
+                 middle_threshold, extra_middle_trim_good_side, extra_middle_trim_bad_side,
+                 discard_middle, discard_unassigned, no_split,
+                 chunk_size=100_000, cache_size=10) -> None:
+
         # Global parameters
         self.input = filepath
+        self.matching_sets = matching_sets
+        self.verbosity = verbosity
+
+        # Parameters for end trimming
+        self.end_size = end_size
+        self.extra_trim_size = extra_trim_size
+        self.end_threshold = end_threshold
+        self.scoring_scheme_vals = scoring_scheme_vals
+        self.min_trim_size = min_trim_size
         self.threads = threads
+        self.check_barcodes = check_barcodes
+        self.barcode_threshold = barcode_threshold
+        self.barcode_diff = barcode_diff
+        self.require_two_barcodes = require_two_barcodes
+        self.forward_or_reverse_barcodes = forward_or_reverse_barcodes
+
+        # Parameters for middle splitting
+        self.middle_threshold = middle_threshold
+        self.extra_middle_trim_good_side = extra_middle_trim_good_side
+        self.extra_middle_trim_bad_side = extra_middle_trim_bad_side
+        self.discard_middle = discard_middle
+        self.discard_unassigned = discard_unassigned
+        self.no_split = no_split
+
         self.chunk_size = chunk_size
 
         # Init multiprocessing
@@ -231,6 +264,9 @@ class FastqChoper(object):
                 q.put(None)
 
         except Exception as e:
+            for q in self.queues_in:
+                q.put(None)
+
             # Exit process if exception is caught
             pid = os.getpid()
             self.errors.append((pid, format_exc()))
@@ -239,6 +275,18 @@ class FastqChoper(object):
 
     def worker(self, queue_in, queue_out):
         try:
+            adapters = []
+            start_sequence_names = set()
+            end_sequence_names = set()
+            for matching_set in self.matching_sets:
+                adapters.append(matching_set.start_sequence)
+                start_sequence_names.add(matching_set.start_sequence[0])
+                if matching_set.end_sequence:
+                    end_sequence_names.add(matching_set.end_sequence[0])
+                    if matching_set.end_sequence[1] == matching_set.start_sequence[1]:
+                        continue
+                    adapters.append(matching_set.end_sequence)
+
             while True:
                 # Exit if error
                 if self.exit.is_set():
@@ -249,13 +297,56 @@ class FastqChoper(object):
                 if chunk is None:
                     break
 
-                queue_out.put(chunk)
+                results = []
+                for _read in chunk:
+                    read = NanoporeRead(_read.id, _read.seq, _read.qual)
+
+                    # find_adapters_at_read_ends
+                    read.find_start_trim(
+                        self.matching_sets, self.end_size, self.extra_trim_size, self.end_threshold,
+                        self.scoring_scheme_vals, self.min_trim_size, self.check_barcodes,
+                        self.forward_or_reverse_barcodes)
+                    read.find_end_trim(
+                        self.matching_sets, self.end_size, self.extra_trim_size, self.end_threshold,
+                        self.scoring_scheme_vals, self.min_trim_size, self.check_barcodes,
+                        self.forward_or_reverse_barcodes)
+
+                    if self.check_barcodes:
+                        read.determine_barcode(
+                            barcode_threshold, barcode_diff, require_two_barcodes)
+
+                    # elif verbosity == 2:
+                    #     sys.stderr.write(read.formatted_start_and_end_seq(end_size, extra_trim_size, check_barcodes),
+                    #         file=print_dest)
+                    # elif verbosity > 2:
+                    #     print(read.full_start_end_output(end_size, extra_trim_size, check_barcodes),
+                    #         file=print_dest)
+
+                    # find_adapters_in_read_middles
+                    if not self.no_split:
+                        if self.discard_unassigned and read.barcode_call == "none":
+                            # if we are discarding unassigned barcodes then there is no point in checking for middle adapters
+                            continue
+
+                        read.find_middle_adapters(
+                            adapters, self.middle_threshold, self.extra_middle_trim_good_side,
+                            self.extra_middle_trim_bad_side, self.scoring_scheme_vals,
+                            start_sequence_names, end_sequence_names)
+
+                        # if read.middle_adapter_positions and verbosity > 1:
+                            # print(read.middle_adapter_results(
+                                # verbosity), file=print_dest, flush=True)
+
+                    results.append(read)
+
+                queue_out.put(results)
 
             # Finish
             queue_out.put(None)
 
         except Exception as e:
             # Exit process if exception is caught
+            queue_out.put(None)
             pid = os.getpid()
             self.errors.append((pid, format_exc()))
             self.exit.set()
@@ -263,6 +354,11 @@ class FastqChoper(object):
 
     def writer(self):
         try:
+            total_reads = 0
+            start_trim_total, start_trim_count = 0, 0
+            end_trim_total, end_trim_count = 0, 0
+            middle_trim_count = 0
+
             is_finish = False
             while True:
                 # Exit if exception
@@ -275,12 +371,184 @@ class FastqChoper(object):
 
                 # Get output
                 for q in cycle(self.queues_out):
-                    res = q.get()
+                    chunk = q.get()
 
                     # If finish
-                    if res is None:
+                    if chunk is None:
                         is_finish = True
                         break
+
+                    # Summarize trimmed bases
+                    total_reads += len(chunk)
+
+                    start_trim_amount = np.array([read.start_trim_amount for read in chunk])
+                    start_trim_total += start_trim_amount.sum()
+                    start_trim_count += (start_trim_amount > 0).sum()
+
+                    end_trim_amount = np.array([read.end_trim_amount for read in chunk])
+                    end_trim_total += end_trim_amount.sum()
+                    end_trim_count += (end_trim_amount > 0).sum()
+
+                    middle_trim_count += sum([1 if read.middle_adapter_positions else 0 for read in chunk])
+                    for read in chunk:
+                        pass
+
+            logger.info("Finished trimming")
+
+            sys.stderr.write('\n' + int_to_str(start_trim_count).rjust(len(int_to_str(total_reads))) +
+                ' / ' + int_to_str(total_reads) + ' reads had adapters trimmed from their start (' +
+                int_to_str(start_trim_total) + ' bp removed)\n')
+            sys.stderr.write(int_to_str(end_trim_count).rjust(len(int_to_str(total_reads))) + ' / ' +
+                int_to_str(total_reads) + ' reads had adapters trimmed from their end (' +
+                int_to_str(end_trim_total) + ' bp removed)\n')
+            verb = 'discarded' if self.discard_middle else 'split'
+            sys.stderr.write(int_to_str(middle_trim_count).rjust(len(int_to_str(total_reads))) +
+                             ' / ' + int_to_str(total_reads) + ' reads were ' +
+                             verb + ' based on middle adapters\n\n')
+
+
+
+            # trimmed_or_untrimmed = 'untrimmed' if untrimmed else 'trimmed'
+            # if barcode_dir is not None:
+            #     verb = 'Saving'
+            #     destination = 'barcode-specific files'
+            # elif output is None:
+            #     verb = 'Outputting'
+            #     destination = 'stdout'
+            # else:
+            #     verb = 'Saving'
+            #     destination = 'file'
+            # logger.info(f'{verb} {trimmed_or_untrimmed} reads to {destination}')
+
+            # if out_format == 'auto':
+            #     if output is None:
+            #         out_format = read_type.lower()
+            #         if barcode_dir is not None and input_filename.lower().endswith('.gz'):
+            #             out_format += '.gz'
+            #     elif '.fasta.gz' in output.lower():
+            #         out_format = 'fasta.gz'
+            #     elif '.fastq.gz' in output.lower():
+            #         out_format = 'fastq.gz'
+            #     elif '.fasta' in output.lower():
+            #         out_format = 'fasta'
+            #     elif '.fastq' in output.lower():
+            #         out_format = 'fastq'
+            #     else:
+            #         out_format = read_type.lower()
+
+            # gzipped_out = False
+            # gzip_command = 'gzip'
+            # if out_format.endswith('.gz') and (barcode_dir is not None or output is not None):
+            #     gzipped_out = True
+            #     out_format = out_format[:-3]
+            #     if shutil.which('pigz'):
+            #         if verbosity > 0:
+            #             print('pigz found - using it to compress instead of gzip')
+            #         gzip_command = 'pigz -p ' + str(threads)
+            #     else:
+            #         if verbosity > 0:
+            #             print('pigz not found - using gzip to compress')
+
+            # # Output reads to barcode bins.
+            # if barcode_dir is not None:
+            #     if not os.path.isdir(barcode_dir):
+            #         os.makedirs(barcode_dir)
+            #     barcode_files = {}
+            #     barcode_read_counts, barcode_base_counts = defaultdict(
+            #         int), defaultdict(int)
+
+            #     for read in reads:
+            #         barcode_name = read.barcode_call
+            #         if discard_unassigned and barcode_name == 'none':
+            #             continue
+            #         if out_format == 'fasta':
+            #             read_str = read.get_fasta(
+            #                 min_split_size, discard_middle, untrimmed, barcode_labels, extended_labels)
+            #         else:
+            #             read_str = read.get_fastq(
+            #                 min_split_size, discard_middle, untrimmed, barcode_labels, extended_labels)
+            #         if not read_str:
+            #             continue
+            #         if barcode_name not in barcode_files:
+            #             barcode_files[barcode_name] = \
+            #                 open(os.path.join(barcode_dir,
+            #                                 barcode_name + '.' + out_format), 'wt')
+            #         barcode_files[barcode_name].write(read_str)
+            #         barcode_read_counts[barcode_name] += 1
+            #         if untrimmed:
+            #             seq_length = len(read.seq)
+            #         else:
+            #             seq_length = read.seq_length_with_start_end_adapters_trimmed()
+            #         barcode_base_counts[barcode_name] += seq_length
+            #     table = [['Barcode', 'Reads', 'Bases', 'File']]
+
+            #     for barcode_name in sorted(barcode_files.keys()):
+            #         barcode_files[barcode_name].close()
+            #         bin_filename = os.path.join(
+            #             barcode_dir, barcode_name + '.' + out_format)
+
+            #         if gzipped_out:
+            #             if not os.path.isfile(bin_filename):
+            #                 continue
+            #             bin_filename_gz = bin_filename + '.gz'
+            #             if os.path.isfile(bin_filename_gz):
+            #                 os.remove(bin_filename_gz)
+            #             try:
+            #                 subprocess.check_output(gzip_command + ' ' + bin_filename,
+            #                                         stderr=subprocess.STDOUT, shell=True)
+            #             except subprocess.CalledProcessError:
+            #                 pass
+            #             bin_filename = bin_filename_gz
+
+            #         table_row = [barcode_name, int_to_str(barcode_read_counts[barcode_name]),
+            #                     int_to_str(barcode_base_counts[barcode_name]), bin_filename]
+            #         table.append(table_row)
+
+            #     if verbosity > 0:
+            #         print('')
+            #         print_table(table, print_dest, alignments='LRRL',
+            #                     max_col_width=60, col_separation=2)
+
+            # # Output to all reads to stdout.
+            # elif output is None:
+            #     for read in reads:
+            #         if discard_unassigned and read.barcode_call == 'none':
+            #             continue
+            #         read_str = read.get_fasta(min_split_size, discard_middle, barcode_labels=barcode_labels, extended_labels=extended_labels) if out_format == 'fasta' \
+            #             else read.get_fastq(min_split_size, discard_middle, barcode_labels=barcode_labels, extended_labels=extended_labels)
+            #         print(read_str, end='')
+            #     if verbosity > 0:
+            #         print('Done', flush=True, file=print_dest)
+
+            # # Output to all reads to file.
+            # else:
+            #     if gzipped_out:
+            #         out_filename = 'TEMP_' + str(os.getpid()) + '.fastq'
+            #     else:
+            #         out_filename = output
+            #     with open(out_filename, 'wt') as out:
+            #         for read in reads:
+            #             if discard_unassigned and read.barcode_call == 'none':
+            #                 continue
+            #             read_str = read.get_fasta(min_split_size, discard_middle, barcode_labels=barcode_labels, extended_labels=extended_labels) if out_format == 'fasta' \
+            #                 else read.get_fastq(min_split_size, discard_middle, barcode_labels=barcode_labels, extended_labels=extended_labels)
+            #             out.write(read_str)
+            #     if gzipped_out:
+            #         subprocess.check_output(gzip_command + ' -c ' + out_filename + ' > ' + output,
+            #                                 stderr=subprocess.STDOUT, shell=True)
+            #         os.remove(out_filename)
+            #     if verbosity > 0:
+            #         print('\nSaved result to ' + os.path.abspath(output), file=print_dest)
+
+            # if verbosity > 0:
+            #     print('', flush=True, file=print_dest)
+
+
+            # if barcode_stats_csv:
+            #     with open("./barcode_stats.csv","w") as custom_output:
+            #         custom_output.write("name,start_time,barcode_call,start_name,start_id,end_name,end_id,middle_name,middle_id\n")
+            #         for read in reads:
+            #             read.write_to_stats_csv(custom_output,barcode_stats_csv)
 
         except Exception as e:
             # Exit process if exception is caught
@@ -308,48 +576,3 @@ class FastqChoper(object):
                 logging.error(f"worker {pid}:\n {e}")
             logging.error("Terminated")
             sys.exit(1)
-
-
-class TrimFastQ(object):
-    """
-    Class for trimming nanopore reads
-    """
-    def __init__(self, infile) -> None:
-        pass
-
-    def data_loader(self):
-        """Iter through query fastq.gz"""
-        try:
-            chunk_size = self.chunk_size
-            exit_event = self.exit
-
-            with open(self.in_file, 'rb') as f, gzip.open(f, 'rt') as g:
-                chunk, cursor = [], 0
-                for line in g:
-                    if exit_event.is_set():
-                        os._exit(1)
-
-                    # Read fastq unit
-                    header = line.rstrip().lstrip('@')
-                    read_id = header.split()[0]
-                    seq = g.readline().rstrip()
-                    sep = g.readline().rstrip()
-                    qual = g.readline().rstrip()
-                    chunk.append([read_id, seq, qual])
-
-                    # Send to queue
-                    if len(chunk) >= chunk_size:
-                        pos = f.tell()
-                        self.q_fastx.put((pos-cursor, chunk))
-                        chunk, cursor = [], pos
-
-                # Send last chunk to queue
-                if len(chunk) > 0:
-                    self.q_fastx.put((f.tell()-cursor, chunk))
-
-        except Exception as e:
-            # Exit process if exception is caught
-            pid = os.getpid()
-            self.errors.append((pid, format_exc()))
-            self.exit.set()
-            os._exit(1)
