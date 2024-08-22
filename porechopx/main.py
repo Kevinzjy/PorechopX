@@ -260,7 +260,7 @@ def main(input_filepath, output_filepath, barcode_stats_csv, out_format, verbosi
                discard_middle, discard_unassigned, no_split,
                out_format, output_filepath, barcode_stats_csv, min_split_read_size,
                barcode_dir, barcode_labels, extended_labels, untrimmed,
-               4_000, 10,
+               100_000, 10,
           )
 
      else:

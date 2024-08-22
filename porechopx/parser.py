@@ -2,7 +2,6 @@ import os
 import sys
 import gzip
 import logging
-import shutil
 import subprocess
 import multiprocessing
 import numpy as np
@@ -247,7 +246,7 @@ class FastqChoper(object):
             destination = 'file'
         logger.info(f'{verb} {trimmed_or_untrimmed} reads to {destination}')
 
-        if shutil.which('pigz'):
+        if subprocess.getstatusoutput('which pigz')[0] == 0:
             logger.info('pigz found - using it to compress instead of gzip')
         else:
             logger.info('pigz not found - using gzip to compress')
@@ -419,7 +418,7 @@ class FastqChoper(object):
                 (self.barcode_dir is not None or self.output is not None):
                 gzipped_out = True
                 self.out_format = self.out_format[:-3]
-                if shutil.which('pigz'):
+                if subprocess.getstatusoutput('which pigz')[0] == 0:
                     gzip_command = f'pigz -p {self.threads}'
 
             # Output reads to barcode bins
@@ -436,7 +435,7 @@ class FastqChoper(object):
             # Output all reads to file
             else:
                 if gzipped_out:
-                    out_filename = self.output.with_name(f'TEMP_{os.getpid()}.fastq')
+                    out_filename = self.output.with_name(f'TEMP_{os.getpid()}.{self.output.stem}.fastq')
                 else:
                     out_filename = self.output
                 out_file = open(out_filename, 'wt')

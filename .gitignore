@@ -1,5 +1,7 @@
 # Python
+dist/*
 *.pyc
+__pycache__/*
 
 # Virtualenv
 .venv/*
@@ -9,3 +11,4 @@
 
 # Requirements
 vendor/needletail
+
