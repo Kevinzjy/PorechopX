@@ -9,7 +9,7 @@ from porechopx.logger import get_logger
 __version__ = importlib.metadata.version('porechopx')
 
 
-@click.command(help='Porechop: a tool for finding adapters in Oxford Nanopore reads, trimming '
+@click.command(help='PorechopX: a tool for finding adapters in Oxford Nanopore reads, trimming '
                     'them from the ends and splitting reads with internal adapters')
 @click.version_option(__version__)
 # Main options
