@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "porechopx"
-version = "0.1.0"
+version = "0.2.0"
 description = ""
 authors = ["kevinzjy <kevinzjy1997@gmail.com>"]
 readme = "README.md"

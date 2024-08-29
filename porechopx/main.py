@@ -35,7 +35,7 @@ __version__ = importlib.metadata.version('porechopx')
                    'a file and stderr if reads are printed to stdout')
 @click.option('-t', '--threads', type=int, default=lambda: min(os.cpu_count(), 16),
               help='Number of threads to use for adapter alignment')
-@click.option('-c', '--chunk_size', type=int, default=1_000,
+@click.option('-c', '--chunk_size', type=int, default=10_000,
               help='Number of reads per chunk')
 # Barcode binning settings:
 #   Control the binning of reads based on barcodes (i.e. barcode demultiplexing)
@@ -89,7 +89,7 @@ __version__ = importlib.metadata.version('porechopx')
 @click.option('--end_size', type=int, default=150,
               help='The number of base pairs at each end of the read which will be searched for '
                    'adapter sequences')
-@click.option('--min_trim_size', type=int, default=4,
+@click.option('--min_trim_size', type=int, default=10,
               help='Adapter alignments smaller than this will be ignored')
 @click.option('--extra_end_trim', type=int, default=2,
               help='This many additional bases will be removed next to adapters found at '

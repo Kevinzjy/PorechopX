@@ -5,10 +5,14 @@ Nanopore reads. PorechopX introduces several key improvements to improve perform
 
 ## Key Features and Modifications
 
-- Replaced the argparse module with click for command-line parsing.
-- Reconstructed the multiprocessing architecture to enable real-time writing of results to the output. This replaces the original behavior where results were only written after all reads were processed, improving efficiency and reducing memory usage.
-- Switched from SeqAn to parasail for semi-global adapter alignment.
-- Pure python implementation without manual compile of SeqAn library.
+- Rewrite using multiprocessing pool to enable real-time writing of results to the output. This replaces the original behavior where results were only written after all reads were processed, improving efficiency and reducing memory usage.
+- Switch from SeqAn to parasail for local adapter alignment, and adjust the default length of adapter trimming from 4 to 10, which will produce more conservative alignments.
+- There is no need for manual compilation of SeqAn library, and provides easy installation with `pip`
+- Replaced the argparse module with click for nested command-line parsing.
+
+## What's not done:
+
+- The verbose output (`--verbosity 2`) has been dropped to avoid performance issues. However, it's useful under some circumstances and should be included in the future version.
 
 ## Requirements
 
@@ -17,9 +21,13 @@ Nanopore reads. PorechopX introduces several key improvements to improve perform
 
 ## Installation
 
-Simple install from PyPI:
+__Installing from PyPI:__<br>
 
 `pip install porechopx`
+
+__Installing development version:__<br>
+
+`pip install git+https://bioinfo.biols.ac.cn/git/zhangjy/PorechopX.git`
 
 ## Quick usage examples
 
@@ -46,21 +54,15 @@ __Got a big server?__<br>
 
 ## Customize adapters
 
-- The ARTIC's version of Porechop allows user specific additional adapters
+- The ARTIC's version of Porechop allows user specific additional adapters in csv format
 
-| Barcode name | Direction | 5' start barcode | 3' end barcode |
-| - | - | - |
-	使用 csv 格式指定自己的 barcode，格式为
-第一列：Barcode name （必须包含“ Barcode “，前后带空格）
-第二列：1
-第三列：5’start barcode
-第二列：3’end barcode
+| Adapter name| Direction {1=Forward,0=Reverse} | 5' start barcode | 3' end barcode |
+| - | - | - | - |
+| Custom Barcode 01 | 1 | ACTTGTACTTCGTTCAGTTGCGTATTGCTTTAACGGTAGAGTTTGATCCTGGCTCAG | AAGTCGTAACAAGGTAACCGTAGTAACGTAAGCAATGCGTAA |
+| Custom Adapter 01 | 1 | ACTTGTACTTCGTTCAGTTGCGTATTGCTTTAACGGTAGAGTTTGATCCTGGCTCAG | AAGTCGTAACAAGGTAACCGTAGTAACGTAAGCAATGCGTAA |
 
-以截图为例：
-
-自定义barcode文件为：
-Custom Barcode 01,1,ACTTGTACTTCGTTCAGTTGCGTATTGCTTTAACGGTAGAGTTTGATCCTGGCTCAG,AAGTCGTAACAAGGTAACCGTAGTAACGTAAGCAATGCGTAA
-
+**NOTE**
+- Barcodes must include 'Barcode' in their names, otherwise will be treated as adapters**
 
 ## Usage
 
@@ -74,6 +76,7 @@ Usage: porechopx [OPTIONS]
   them from the ends and splitting reads with internal adapters
 
 Main options:
+  --version                       Show the version and exit.
   -i, --input TEXT                FASTA/FASTQ of input reads or a directory
                                   which will be recursively searched for FASTQ
                                   files  [required]
@@ -87,13 +90,16 @@ Main options:
   --format [auto|fasta|fastq|fasta.gz|fastq.gz]
                                   Output format for the reads - if auto, the
                                   format will be chosen based on the output
-                                  filename or the input read format
+                                  filename or the input read format  [default:
+                                  auto]
   -v, --verbosity INTEGER         Level of progress information: 0 = none, 1 =
                                   some, 2 = lots, 3 = full - output will go to
                                   stdout if reads are saved to a file and
                                   stderr if reads are printed to stdout
+                                  [default: 1]
   -t, --threads INTEGER           Number of threads to use for adapter
-                                  alignment
+                                  alignment  [default: (dynamic)]
+  -c, --chunk_size INTEGER        Number of reads per chunk  [default: 10,000]
 
 Barcode binning settings:
   Control the binning of reads based on barcodes (i.e. barcode demultiplexing)
@@ -118,11 +124,13 @@ Barcode binning settings:
   --custom_barcodes TEXT          CSV file containing custom barcode sequences
   --barcode_threshold FLOAT       A read must have at least this percent
                                   identity to a barcode to be binned
+                                  [default: 75.0]
   --barcode_diff FLOAT            If the difference between a read's best
                                   barcode identity and its second-best barcode
                                   identity is less than this value, it will
                                   not be put in a barcode bin (to exclude
                                   cases which are too close to call)
+                                  [default: 5.0]
   --require_two_barcodes          Reads will only be put in barcode bins if
                                   they have a strong match for the barcode on
                                   both their start and end (default: a read
@@ -138,26 +146,28 @@ Adapter search settings:
 
   --adapter_threshold FLOAT       An adapter set has to have at least this
                                   percent identity to be labelled as present
-                                  and trimmed off (0 to 100)
+                                  and trimmed off (0 to 100)  [default: 90.0]
   --check_reads INTEGER           This many reads will be aligned to all
                                   possible adapters to determine which adapter
-                                  sets are present
+                                  sets are present  [default: 10000]
   --scoring_scheme TEXT           Comma-delimited string of alignment scores:
                                   match, mismatch, gap open, gap extend
+                                  [default: 3,-6,5,2]
 
 End adapter settings:
   Control the trimming of adapters from read ends
 
   --end_size INTEGER              The number of base pairs at each end of the
                                   read which will be searched for adapter
-                                  sequences
+                                  sequences  [default: 150]
   --min_trim_size INTEGER         Adapter alignments smaller than this will be
-                                  ignored
+                                  ignored  [default: 10]
   --extra_end_trim INTEGER        This many additional bases will be removed
                                   next to adapters found at the ends of reads
+                                  [default: 2]
   --end_threshold FLOAT           Adapters at the ends of reads must have at
                                   least this percent identity to be removed (0
-                                  to 100)
+                                  to 100)  [default: 75.0]
 
 Middle adapter settings:
   Control the splitting of read from middle adapters
@@ -170,15 +180,18 @@ Middle adapter settings:
                                   split)
   --middle_threshold FLOAT        Adapters in the middle of reads must have at
                                   least this percent identity to be found (0
-                                  to 100)
+                                  to 100)  [default: 90.0]
   --extra_middle_trim_good_side INTEGER
                                   This many additional bases will be removed
                                   next to middle adapters on their "good" side
+                                  [default: 10]
   --extra_middle_trim_bad_side INTEGER
                                   This many additional bases will be removed
                                   next to middle adapters on their "bad" side
+                                  [default: 100]
   --min_split_read_size INTEGER   Post-split read pieces smaller than this
                                   many base pairs will not be outputted
+                                  [default: 1000]
 
 Help:
   --help                          Show this message and exit.
