@@ -435,7 +435,7 @@ class FastqChoper(object):
             # Output all reads to file
             else:
                 if gzipped_out:
-                    out_filename = self.output.with_name(f'TEMP_{os.getpid()}.{self.output.stem}.fastq')
+                    out_filename = self.output.with_name(f'TEMP_{os.getpid()}.{self.output.stem}')
                 else:
                     out_filename = self.output
                 out_file = open(out_filename, 'wt')

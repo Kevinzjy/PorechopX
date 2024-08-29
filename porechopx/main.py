@@ -34,6 +34,8 @@ __version__ = importlib.metadata.version('porechopx')
                    'a file and stderr if reads are printed to stdout')
 @click.option('-t', '--threads', type=int, default=lambda: min(os.cpu_count(), 16),
               help='Number of threads to use for adapter alignment')
+@click.option('-c', '--chunk_size', type=int, default=1_000,
+              help='Number of reads per chunk')
 # Barcode binning settings:
 #   Control the binning of reads based on barcodes (i.e. barcode demultiplexing)
 @click.option('-b', '--barcode_dir',
@@ -115,7 +117,7 @@ __version__ = importlib.metadata.version('porechopx')
               help='Post-split read pieces smaller than this many base pairs '
                    'will not be outputted')
 def main(input_filepath, output_filepath, barcode_stats_csv, out_format, verbosity, threads,
-         barcode_dir, barcode_labels, extended_labels,
+         chunk_size, barcode_dir, barcode_labels, extended_labels,
          native_barcodes, pcr_barcodes, rapid_barcodes, limit_barcodes_to, custom_barcodes,
          barcode_threshold, barcode_diff, require_two_barcodes, untrimmed, discard_unassigned,
          adapter_threshold, check_read_count, scoring_scheme,
@@ -202,9 +204,8 @@ def main(input_filepath, output_filepath, barcode_stats_csv, out_format, verbosi
 
           if custom_barcodes:
                matching_sets = adapters.load_custom_barcodes(custom_barcodes)
-               if args.verbosity > 0:
-                    logger.info('Using custom barcodes')
-                    logger.info(f'{len(matching_sets)} barcodes in search set')
+               logger.info('Using custom barcodes')
+               logger.info(f'{len(matching_sets)} barcodes in search set')
 
           if not matching_sets:
                if not search_adapters:
@@ -260,7 +261,7 @@ def main(input_filepath, output_filepath, barcode_stats_csv, out_format, verbosi
                discard_middle, discard_unassigned, no_split,
                out_format, output_filepath, barcode_stats_csv, min_split_read_size,
                barcode_dir, barcode_labels, extended_labels, untrimmed,
-               100_000, 10,
+               chunk_size, 10,
           )
 
      else:
