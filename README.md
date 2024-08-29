@@ -57,7 +57,7 @@ __Got a big server?__<br>
 - The ARTIC's version of Porechop allows user specific additional adapters in csv format
 
 | Adapter name| Direction {1=Forward,0=Reverse} | 5' start barcode | 3' end barcode |
-| - | - | - | - |
+| ---- | ---- | ---- | ---- |
 | Custom Barcode 01 | 1 | ACTTGTACTTCGTTCAGTTGCGTATTGCTTTAACGGTAGAGTTTGATCCTGGCTCAG | AAGTCGTAACAAGGTAACCGTAGTAACGTAAGCAATGCGTAA |
 | Custom Adapter 01 | 1 | ACTTGTACTTCGTTCAGTTGCGTATTGCTTTAACGGTAGAGTTTGATCCTGGCTCAG | AAGTCGTAACAAGGTAACCGTAGTAACGTAAGCAATGCGTAA |
 
