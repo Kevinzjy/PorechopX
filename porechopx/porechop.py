@@ -184,7 +184,7 @@ class NanoporeRead(object):
         read_seq_start = self.seq[:end_size]
         for adapter in adapters:
             full_score, partial_score, read_start, read_end = \
-                align_adapter_global(read_seq_start, adapter.start_sequence[1], *scoring_scheme_vals)
+                align_adapter(read_seq_start, adapter.start_sequence[1], *scoring_scheme_vals)
             if partial_score > end_threshold and read_end != end_size and \
                     read_end - read_start >= min_trim_size:
                 trim_amount = read_end + extra_trim_size
@@ -206,7 +206,7 @@ class NanoporeRead(object):
             if not adapter.end_sequence:
                 continue
             full_score, partial_score, read_start, read_end = \
-                align_adapter_global(read_seq_end, adapter.end_sequence[1], *scoring_scheme_vals)
+                align_adapter(read_seq_end, adapter.end_sequence[1], *scoring_scheme_vals)
             if partial_score > end_threshold and read_start != 0 and \
                     read_end - read_start >= min_trim_size:
                 trim_amount = (end_size - read_start) + extra_trim_size
@@ -529,8 +529,8 @@ def align_adapter_global(read, adapter, match=3, mismatch=-6, gap_open=5, gap_ex
     Global alignment of (read, adapter)
     """
     matrix = parasail.matrix_create("ACGT", match, mismatch)
-    # hit = parasail.sg_qx_trace(read, adapter, gap_open, gap_extend, matrix)
-    hit = parasail.sg_trace(read, adapter, gap_open, gap_extend, matrix)
+    hit = parasail.sg_qx_trace(read, adapter, gap_open, gap_extend, matrix)
+    # hit = parasail.sg_trace(read, adapter, gap_open, gap_extend, matrix)
     if hit is None: # If no hit
         read_start = -1
         read_end = 0
@@ -540,10 +540,14 @@ def align_adapter_global(read, adapter, match=3, mismatch=-6, gap_open=5, gap_ex
         adapter_str = hit.traceback.ref
         read_start = len(adapter_str) - len(adapter_str.lstrip("-"))
         read_end = len(adapter_str) - len(adapter_str.rstrip("-"))
+
+        # _read = read[hit.read_begin1:hit.read_end1+1]
+        # _adapter = adapter[hit.ref_begin1:hit.ref_end1+1]
+
         n_match = sum([i == k for i, j, k in zip(
             hit.traceback.query, hit.traceback.comp, hit.traceback.ref)])
         aligned_region_percent_identity = 100 * n_match / len(adapter_str.strip("-"))
-        full_adapter_percent_identity = 100 * n_match / len(adapter)
+        full_adapter_percent_identity = 100 * n_match / len(adapter_str.strip("-"))
 
     return full_adapter_percent_identity, aligned_region_percent_identity, read_start, read_end
 

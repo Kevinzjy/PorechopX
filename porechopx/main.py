@@ -10,7 +10,8 @@ __version__ = importlib.metadata.version('porechopx')
 
 
 @click.command(help='PorechopX: a tool for finding adapters in Oxford Nanopore reads, trimming '
-                    'them from the ends and splitting reads with internal adapters')
+                    'them from the ends and splitting reads with internal adapters',
+               context_settings={'show_default': True})
 @click.version_option(__version__)
 # Main options
 @click.option('-i', '--input', 'input_filepath', required=True,
