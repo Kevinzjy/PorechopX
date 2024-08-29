@@ -614,6 +614,8 @@ def load_custom_barcodes(custom_barcode_file):
     barcode_dict = {}
     with open(custom_barcodes,"r") as f:
         for l in f:
+            if l.startswith("#"):
+                continue
             c +=1
             tokens=l.split(',')
             name=tokens[0]
